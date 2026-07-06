@@ -183,3 +183,81 @@ func TestJSONRPCRequestRoundTrip(t *testing.T) {
 		t.Errorf("skillId = %q, want foo", params.SkillID)
 	}
 }
+
+// --- Fuzz tests for the protocol boundary ---
+
+// FuzzPartUnmarshalJSON exercises Part.UnmarshalJSON with random input to
+// ensure it never panics or allocates unboundedly on malformed JSON.
+func FuzzPartUnmarshalJSON(f *testing.F) {
+	// Seed corpus: known-good shapes that exercise all branches.
+	f.Add([]byte(`{"text":"hello"}`))
+	f.Add([]byte(`{"type":"data","data":{"key":"value"}}`))
+	f.Add([]byte(`{"type":"file","file":{"name":"x.pdf","bytes":"AAAA"},"metadata":{"trace":"abc"}}`))
+	f.Add([]byte(`{"type":"text","text":"hi","extra_field":123}`))
+	f.Add([]byte(`{}`))
+	f.Add([]byte(`{"type":"","text":"","data":null}`))
+	f.Add([]byte(`{"type":"text","text":"real","data":{"nested":true},"unknown_key":"val"}`))
+	f.Add([]byte(`not json at all`))
+	f.Add([]byte(`[]`))
+	f.Add([]byte(`null`))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var p Part
+		if err := p.UnmarshalJSON(data); err != nil {
+			// Parse failure is expected for most random input — not a bug.
+			return
+		}
+		// If unmarshal succeeded, marshal must also succeed without panic.
+		out, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("Marshal failed after successful Unmarshal: %v", err)
+		}
+		// The output must be valid JSON.
+		if !json.Valid(out) {
+			t.Fatalf("Marshal produced invalid JSON: %s", string(out))
+		}
+		// Re-unmarshal must succeed (idempotency).
+		var p2 Part
+		if err := json.Unmarshal(out, &p2); err != nil {
+			t.Fatalf("re-Unmarshal failed: %v\n  marshaled: %s", err, string(out))
+		}
+	})
+}
+
+// FuzzPartRoundTrip verifies that valid JSON objects survive
+// Unmarshal→Marshal→Unmarshal with structural equality.
+func FuzzPartRoundTrip(f *testing.F) {
+	f.Add([]byte(`{"text":"hello"}`))
+	f.Add([]byte(`{"type":"data","data":{"q":"hi","tags":["a","b"]}}`))
+	f.Add([]byte(`{"type":"file","file":{"uri":"s3://bucket/key"}}`))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		// Only test valid JSON objects — skip arrays, primitives, etc.
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(data, &probe); err != nil {
+			return
+		}
+
+		var p1 Part
+		if err := json.Unmarshal(data, &p1); err != nil {
+			return
+		}
+		marshaled, err := json.Marshal(p1)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		var p2 Part
+		if err := json.Unmarshal(marshaled, &p2); err != nil {
+			t.Fatalf("re-Unmarshal: %v\n  data: %s", err, string(marshaled))
+		}
+		// Structural comparison: marshal both and compare as generic maps.
+		out1, _ := json.Marshal(p1)
+		out2, _ := json.Marshal(p2)
+		var m1, m2 map[string]any
+		_ = json.Unmarshal(out1, &m1)
+		_ = json.Unmarshal(out2, &m2)
+		if !reflect.DeepEqual(m1, m2) {
+			t.Fatalf("round-trip mismatch:\n  in:  %s\n  p1:  %s\n  p2:  %s", string(data), string(out1), string(out2))
+		}
+	})
+}

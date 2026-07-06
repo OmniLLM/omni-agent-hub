@@ -57,8 +57,8 @@ func (d *Dispatcher) SendMessageSubscribe(ctx context.Context, req UnaryRequest)
 	if prep.Upstream.Auth.Scheme == "bearer" && prep.Upstream.Auth.Token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+prep.Upstream.Auth.Token)
 	}
-	// Streams don't inherit the 300s unary cap.
-	streamClient := &http.Client{Timeout: 0}
+	// Streams use the shared transport but without the unary timeout cap.
+	streamClient := &http.Client{Transport: d.StreamTransport, Timeout: 0}
 	resp, err := streamClient.Do(httpReq)
 	if err != nil {
 		d.Reg.RecordFailure(prep.Upstream.ID, err)

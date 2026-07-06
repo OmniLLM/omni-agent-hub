@@ -4,9 +4,11 @@
 BINARY := oah
 CMD := ./cmd/omni-agent-hub
 SERVICE := omni-agent-hub.service
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -ldflags "-X github.com/OmniLLM/omni-agent-hub/internal/cli.version=$(VERSION)"
 
 build:
-	go build -o $(BINARY) $(CMD)
+	go build $(LDFLAGS) -o $(BINARY) $(CMD)
 
 run: build
 	./$(BINARY) serve

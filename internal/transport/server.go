@@ -11,6 +11,7 @@ package transport
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -94,6 +95,7 @@ func setCORSHeaders(w http.ResponseWriter) {
 }
 
 func handleCORSPreflight(w http.ResponseWriter, _ *http.Request) {
+	setCORSHeaders(w)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -108,6 +110,7 @@ func traceMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := uuid.NewString()
 		ctx := context.WithValue(r.Context(), traceIDKey, id)
+		w.Header().Set("X-Request-ID", id)
 		slog.Debug("http request", "trace_id", id,
 			"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -143,7 +146,7 @@ func keyGuard(expected, kind string, next http.HandlerFunc) http.HandlerFunc {
 		if got == "" {
 			got = r.Header.Get("X-API-Key")
 		}
-		if got != expected {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
 			writeJSON(w, http.StatusUnauthorized,
 				map[string]string{"error": "unauthorized: invalid or missing " + kind + " key"})
 			return

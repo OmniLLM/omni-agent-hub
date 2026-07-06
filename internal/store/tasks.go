@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/OmniLLM/omni-agent-hub/internal/a2a"
 )
@@ -101,6 +102,7 @@ func (s *Store) LookupContext(ctx context.Context, contextID string) (string, bo
 		return "", false
 	}
 	if err != nil {
+		slog.Warn("LookupContext: unexpected DB error", "context_id", contextID, "err", err)
 		return "", false
 	}
 	return upstreamID, true
@@ -122,6 +124,8 @@ func (s *Store) LookupHubTaskByContext(ctx context.Context, contextID, upstreamI
 		return "", false
 	}
 	if err != nil {
+		slog.Warn("LookupHubTaskByContext: unexpected DB error",
+			"context_id", contextID, "upstream_id", upstreamID, "err", err)
 		return "", false
 	}
 	return id, true

@@ -55,13 +55,15 @@ type Stream interface {
 
 // Dispatcher implements both Unary and Stream.
 type Dispatcher struct {
-	Reg    registry.Registry
-	Store  *store.Store
-	Client *http.Client
+	Reg             registry.Registry
+	Store           *store.Store
+	Client          *http.Client
+	StreamTransport *http.Transport // shared transport for SSE streams (no timeout)
 }
 
 // New constructs a Dispatcher with sensible HTTP defaults.
 func New(reg registry.Registry, s *store.Store) *Dispatcher {
+	streamTransport := http.DefaultTransport.(*http.Transport).Clone()
 	return &Dispatcher{
 		Reg:   reg,
 		Store: s,
@@ -71,6 +73,7 @@ func New(reg registry.Registry, s *store.Store) *Dispatcher {
 			// connect); the 300s value dominates.
 			Timeout: 300 * time.Second,
 		},
+		StreamTransport: streamTransport,
 	}
 }
 
@@ -83,7 +86,9 @@ func (d *Dispatcher) SendMessage(ctx context.Context, req UnaryRequest) (UnaryRe
 
 	respBody, httpErr := d.postToUpstream(ctx, prep.Upstream, prep.Body, "application/json")
 	if httpErr != nil {
-		d.Reg.RecordFailure(prep.Upstream.ID, httpErr)
+		if !isClientError(httpErr) {
+			d.Reg.RecordFailure(prep.Upstream.ID, httpErr)
+		}
 		_ = d.Store.UpdateTaskSnapshot(ctx, prep.HubTaskID, a2a.TaskStateFailed, nil)
 		_ = d.Store.WriteAudit(ctx, store.AuditEntry{
 			TraceID: req.TraceID, HubTaskID: prep.HubTaskID,
@@ -211,9 +216,27 @@ func (d *Dispatcher) upstreamFor(id registry.UpstreamID) (registry.Upstream, err
 	return u, nil
 }
 
+// httpClientError marks errors caused by client-side issues (4xx) that should
+// NOT count against the upstream's circuit breaker.
+type httpClientError struct {
+	err error
+}
+
+func (e *httpClientError) Error() string { return e.err.Error() }
+func (e *httpClientError) Unwrap() error { return e.err }
+
+// isClientError reports whether err is a client-caused HTTP error (4xx) that
+// should not penalize the upstream's circuit breaker.
+func isClientError(err error) bool {
+	var ce *httpClientError
+	return errors.As(err, &ce)
+}
+
 // postToUpstream sends body to the upstream and returns the response body on
 // HTTP 200. Any non-2xx / network error is returned as an error suitable for
 // wrapping into a JSON-RPC error and for RecordFailure.
+// 4xx errors are wrapped in httpClientError so callers can distinguish them
+// from infrastructure failures and avoid penalizing the circuit breaker.
 func (d *Dispatcher) postToUpstream(ctx context.Context, u registry.Upstream, body []byte, accept string) ([]byte, error) {
 	target := strings.TrimRight(u.BaseURL, "/") + "/"
 	slog.Debug("upstream POST",
@@ -259,9 +282,8 @@ func (d *Dispatcher) postToUpstream(ctx context.Context, u registry.Upstream, bo
 		return nil, fmt.Errorf("upstream returned HTTP %d: %s", resp.StatusCode, summarizeBody(respBody))
 	}
 	if resp.StatusCode/100 != 2 {
-		// 4xx is generally client-caused, but keep body context so callers get an
-		// actionable error instead of an opaque JSON parse failure.
-		return nil, fmt.Errorf("upstream returned HTTP %d: %s", resp.StatusCode, summarizeBody(respBody))
+		// 4xx is generally client-caused; wrap so callers can skip breaker penalty.
+		return nil, &httpClientError{err: fmt.Errorf("upstream returned HTTP %d: %s", resp.StatusCode, summarizeBody(respBody))}
 	}
 	return respBody, nil
 }

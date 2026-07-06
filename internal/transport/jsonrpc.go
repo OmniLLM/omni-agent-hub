@@ -15,6 +15,8 @@ import (
 
 // handleJSONRPC dispatches to the right method by name.
 func (s *Server) handleJSONRPC(w http.ResponseWriter, r *http.Request) {
+	// Cap request body to 10 MB to prevent unbounded memory allocation.
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeJSONRPCError(w, nil, a2a.ErrParseError, "Parse error", err.Error())

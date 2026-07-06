@@ -82,9 +82,12 @@ func runServe(cmd *cobra.Command, opts *Opts, host string, port int) error {
 	if err := registry.Bootstrap(ctx, reg, db, cfg.Upstream); err != nil {
 		return fmt.Errorf("bootstrap registry: %w", err)
 	}
-	// Best-effort initial card refresh.
+	// Best-effort initial card refresh. Use a detached context so the refresh
+	// completes even if SIGINT arrives during startup.
 	go func() {
-		if err := reg.RefreshAll(ctx); err != nil {
+		refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+		defer cancel()
+		if err := reg.RefreshAll(refreshCtx); err != nil {
 			slog.Warn("initial card refresh failed", "err", err)
 		}
 	}()

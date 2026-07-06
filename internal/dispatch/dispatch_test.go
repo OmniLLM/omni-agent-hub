@@ -176,3 +176,34 @@ func TestSendMessage_NonJSONUpstreamIncludesBodySnippet(t *testing.T) {
 		t.Fatalf("unexpected error data: %q", data)
 	}
 }
+
+func TestSendMessage_4xxDoesNotTripBreaker(t *testing.T) {
+	// A 404 from upstream is a client error — the breaker should NOT trip,
+	// so a 4th call must NOT get ErrUnavailable.
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("Not Found"))
+	})
+	d, u := setupWithUpstream(t, notFound)
+	req := UnaryRequest{
+		Res:     router.Resolution{UpstreamID: u.ID, Reason: router.ReasonSkill},
+		Message: a2a.Message{Role: a2a.RoleUser, Parts: []a2a.Part{{Text: "hi"}}},
+	}
+	// Send 4 times — all should get ErrUpstreamHTTP, never ErrUnavailable.
+	for i := 0; i < 4; i++ {
+		_, err := d.SendMessage(context.Background(), req)
+		if err == nil {
+			t.Fatalf("call %d: expected error", i+1)
+		}
+		jrpcErr, ok := err.(*a2a.JSONRPCError)
+		if !ok {
+			t.Fatalf("call %d: expected *a2a.JSONRPCError, got %T: %v", i+1, err, err)
+		}
+		if jrpcErr.Code == a2a.ErrUnavailable {
+			t.Fatalf("call %d: 4xx should NOT trip the breaker, but got ErrUnavailable", i+1)
+		}
+		if jrpcErr.Code != a2a.ErrUpstreamHTTP {
+			t.Fatalf("call %d: expected ErrUpstreamHTTP, got %d", i+1, jrpcErr.Code)
+		}
+	}
+}
