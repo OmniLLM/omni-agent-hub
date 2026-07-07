@@ -195,6 +195,18 @@ func (d *Dispatcher) CancelTask(ctx context.Context, hubTaskID string) error {
 	}
 	task, err := d.forwardTaskCall(ctx, up, "tasks/cancel", upstreamTaskID)
 	if err != nil {
+		// If the upstream no longer knows this task (e.g. it restarted and
+		// lost ephemeral state), treat it as a successful cancel — the task
+		// is gone upstream, so we mark it canceled locally.
+		var rpcErr *a2a.JSONRPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == a2a.ErrTaskNotFound {
+			_ = d.Store.UpdateTaskSnapshot(ctx, hubTaskID, a2a.TaskStateCanceled, nil)
+			_ = d.Store.WriteAudit(ctx, store.AuditEntry{
+				HubTaskID: hubTaskID, UpstreamID: row.UpstreamID, Event: store.EventCancel,
+				Detail: map[string]string{"note": "upstream task not found, marked canceled locally"},
+			})
+			return nil
+		}
 		return err
 	}
 	task.TaskID = hubTaskID

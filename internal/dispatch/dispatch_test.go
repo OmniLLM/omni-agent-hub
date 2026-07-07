@@ -207,3 +207,61 @@ func TestSendMessage_4xxDoesNotTripBreaker(t *testing.T) {
 		}
 	}
 }
+
+func TestCancelTask_UpstreamNotFound_MarksCanceledLocally(t *testing.T) {
+	// Simulate an upstream that lost the task (returns ErrTaskNotFound on tasks/cancel).
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req a2a.JSONRPCRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if req.Method == "message/send" {
+			task := a2a.Task{
+				TaskID:    "upstream-task-xyz",
+				ContextID: "ctx-1",
+				Status:    a2a.TaskStatus{State: a2a.TaskStateWorking},
+			}
+			resp := a2a.JSONRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: task}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		// tasks/cancel → upstream doesn't know this task anymore.
+		resp := a2a.JSONRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error:   a2a.NewError(a2a.ErrTaskNotFound, "Task not found", "upstream-task-xyz"),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	d, u := setupWithUpstream(t, handler)
+	ctx := context.Background()
+
+	// First, send a message so we have a hub task with a mapped upstream ID.
+	sendResp, err := d.SendMessage(ctx, UnaryRequest{
+		Res:     router.Resolution{UpstreamID: u.ID, Reason: router.ReasonSkill},
+		Message: a2a.Message{Role: a2a.RoleUser, Parts: []a2a.Part{{Text: "do stuff"}}},
+	})
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	hubTaskID := sendResp.Task.TaskID
+
+	// Now cancel — upstream will say "not found" but hub should succeed.
+	if err := d.CancelTask(ctx, hubTaskID); err != nil {
+		t.Fatalf("CancelTask should succeed when upstream lost the task, got: %v", err)
+	}
+
+	// Verify the hub marked it as canceled.
+	row, err := d.Store.GetTask(ctx, hubTaskID)
+	if err != nil {
+		t.Fatalf("GetTask after cancel: %v", err)
+	}
+	if row.State != a2a.TaskStateCanceled {
+		t.Fatalf("expected state canceled, got %s", row.State)
+	}
+}

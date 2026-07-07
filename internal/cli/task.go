@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -169,6 +170,12 @@ If no task-id is provided, interactively select from active tasks.`,
 				taskID = entry.HubTaskID
 			}
 
+			resolvedID, err := resolveTaskID(c, taskID)
+			if err != nil {
+				return err
+			}
+			taskID = resolvedID
+
 			resp, err := c.do("GET", "/admin/tasks/"+taskID, nil)
 			if err != nil {
 				return fmt.Errorf("cannot reach hub at %s — is it running?\n  %w", c.baseURL, err)
@@ -250,6 +257,12 @@ If no task-id is provided, interactively select from active tasks.`,
 				return nil
 			}
 
+			resolvedID, err := resolveTaskID(c, taskID)
+			if err != nil {
+				return err
+			}
+			taskID = resolvedID
+
 			resp, err := c.do("POST", "/admin/tasks/"+taskID+"/cancel", nil)
 			if err != nil {
 				return fmt.Errorf("cannot reach hub at %s — is it running?\n  %w", c.baseURL, err)
@@ -326,4 +339,38 @@ func selectTask(c *adminClient, includeRecent bool) (*taskEntry, error) {
 		return nil, nil
 	}
 	return &data.Items[idx], nil
+}
+
+func resolveTaskID(c *adminClient, taskID string) (string, error) {
+	if taskID == "" {
+		return "", nil
+	}
+	if len(taskID) >= 8 && strings.Contains(taskID, "-") {
+		return taskID, nil
+	}
+
+	path := "/admin/tasks?limit=20&recent=true"
+	resp, err := c.do("GET", path, nil)
+	if err != nil {
+		return "", fmt.Errorf("cannot reach hub at %s — is it running?\n  %w", c.baseURL, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", httpErr(resp)
+	}
+
+	var data struct {
+		Items []taskEntry `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return "", err
+	}
+
+	for _, item := range data.Items {
+		if strings.HasPrefix(item.HubTaskID, taskID) {
+			return item.HubTaskID, nil
+		}
+	}
+
+	return taskID, nil
 }
