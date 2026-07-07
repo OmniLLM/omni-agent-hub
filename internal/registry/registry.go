@@ -181,7 +181,18 @@ func (r *registryImpl) bootstrap(ctx context.Context, cfg []config.UpstreamCfg) 
 	}
 
 	// 1) Take DB rows as the starting point.
+	//    Skip admin-source rows that were soft-deleted via `oah up remove`
+	//    UNLESS config re-declares them (in which case config wins and the
+	//    upstream is re-adopted with the original DB id preserved).
+	//    Rationale: admin-removed rows are retained in DB only to keep
+	//    tasks.upstream_id FK references valid; they must not resurface in
+	//    the in-memory registry after restart.
 	for _, row := range rows {
+		if row.Source == store.SourceAdmin && !row.Enabled {
+			if _, reclaimed := cfgByName[row.Name]; !reclaimed {
+				continue
+			}
+		}
 		u := upstreamFromRow(row)
 		r.byID[u.ID] = u
 		r.byName[u.Name] = u.ID
@@ -209,12 +220,10 @@ func (r *registryImpl) bootstrap(ctx context.Context, cfg []config.UpstreamCfg) 
 			u.BaseURL = c.BaseURL
 			u.Auth = c.Auth
 			u.Prefix = c.Prefix
-			// If an admin explicitly disabled this upstream (e.g. via
-			// `oah up remove`), config must NOT re-enable it. Only
-			// override Enabled when the row was NOT admin-disabled.
-			if !(u.Source == store.SourceAdmin && !u.Enabled) {
-				u.Enabled = c.Enabled
-			}
+			// Config re-declaration re-enables the upstream (this covers
+			// the admin-removed + re-declared-in-config case; step 1
+			// already re-adopted the DB row so id/FKs stay stable).
+			u.Enabled = c.Enabled
 			// Do NOT downgrade source from admin.
 		}
 		u := r.byID[id]

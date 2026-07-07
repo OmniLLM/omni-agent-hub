@@ -278,8 +278,9 @@ func adminList(t *testing.T, hubURL string) []map[string]any {
 }
 
 func TestIntegration_AddRemove_PersistsAcrossRestart(t *testing.T) {
-	// Verifies that admin-added upstreams survive restart, and admin-removed
-	// ones stay removed — even when config re-lists them.
+	// If the admin-removed upstream is NOT in config.yaml, it must not
+	// reappear after restart. (If config declares it, config wins — see
+	// TestIntegration_ConfigOverridesAdminRemoval.)
 	_, fake, db, _, cleanup := bootHubWithDB(t)
 	defer cleanup()
 
@@ -297,29 +298,75 @@ func TestIntegration_AddRemove_PersistsAcrossRestart(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 
-	// Simulate restart with config that mentions the same upstream name.
-	cfgUpstreams := []config.UpstreamCfg{
-		{Name: "ephemeral", BaseURL: fake.URL, Auth: config.AuthConfig{Scheme: "none"}, Enabled: true},
-	}
-	hub2, reg2 := rebuildHub(t, db, cfgUpstreams)
+	// Simulate restart with NO config entries (this is the real-world case
+	// from the bug report: hermes was admin-added and only omnilauncher is
+	// in config.yaml).
+	hub2, reg2 := rebuildHub(t, db, nil)
 	defer hub2.Close()
 
 	// The admin-removed upstream must NOT reappear.
 	list := adminList(t, hub2.URL)
 	for _, item := range list {
 		if item["name"] == "ephemeral" {
-			enabled, _ := item["enabled"].(bool)
-			if enabled {
-				t.Fatalf("admin-removed upstream 'ephemeral' was resurrected by restart — bug!")
-			}
+			t.Fatalf("admin-removed upstream 'ephemeral' was resurrected by restart — bug!")
 		}
 	}
 
 	// The registry should also not expose it.
 	for _, u := range reg2.List() {
-		if u.Name == "ephemeral" && u.Enabled {
+		if u.Name == "ephemeral" {
 			t.Fatalf("admin-removed upstream should not appear in registry List()")
 		}
+	}
+}
+
+func TestIntegration_ConfigOverridesAdminRemoval(t *testing.T) {
+	// If the user explicitly re-declares the upstream in config.yaml, config
+	// wins and the upstream is re-adopted (preserving the original DB id).
+	_, fake, db, _, cleanup := bootHubWithDB(t)
+	defer cleanup()
+
+	// Admin add + remove.
+	reg1 := registry.New(db, nil)
+	u, err := reg1.Add(context.Background(), registry.AddInput{
+		Name: "reclaimed", BaseURL: fake.URL, Auth: config.AuthConfig{Scheme: "none"},
+	})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	origID := u.ID
+	if err := reg1.Remove(context.Background(), u.ID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// Restart with config re-declaring the upstream.
+	cfgUpstreams := []config.UpstreamCfg{
+		{Name: "reclaimed", BaseURL: fake.URL, Auth: config.AuthConfig{Scheme: "none"}, Enabled: true},
+	}
+	hub2, reg2 := rebuildHub(t, db, cfgUpstreams)
+	defer hub2.Close()
+
+	// Should be present and enabled.
+	list := adminList(t, hub2.URL)
+	if len(list) != 1 {
+		t.Fatalf("expected 1 upstream, got %+v", list)
+	}
+	if list[0]["name"] != "reclaimed" {
+		t.Fatalf("expected 'reclaimed', got %+v", list[0])
+	}
+	// The DB id must be preserved (so any task FKs still work).
+	if list[0]["id"] != string(origID) {
+		t.Fatalf("expected DB id preserved: got %v, want %s", list[0]["id"], origID)
+	}
+	// Registry List should also show it.
+	found := false
+	for _, u := range reg2.List() {
+		if u.Name == "reclaimed" && u.Enabled {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("reclaimed upstream should be in registry list")
 	}
 }
 
@@ -752,4 +799,100 @@ func TestIntegration_AdminAuth_Unauthorized(t *testing.T) {
 		t.Fatalf("wrong key: expected 401, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+func TestIntegration_AdminRemove_DoesNotReappearAfterRestart_NoConfig(t *testing.T) {
+	// Regression: the real-world scenario reported by users.
+	// Add via admin API → Remove via admin API → restart with NO config
+	// upstream entries → removed upstream must NOT reappear in `oah up list`.
+	// Bug was: bootstrap loaded all DB rows (including admin-source enabled=0)
+	// into the in-memory registry, so /admin/upstreams returned them.
+	hub, fake, db, _, cleanup := bootHubWithDB(t)
+	defer cleanup()
+
+	// Add via admin API.
+	addBody := `{"name":"ghost","base_url":"` + fake.URL + `","auth":{"scheme":"none"}}`
+	resp, _ := http.DefaultClient.Do(adminReq("POST", hub.URL+"/admin/upstreams", addBody))
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("add: status=%d body=%s", resp.StatusCode, body)
+	}
+	var created map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+	id := created["id"].(string)
+
+	// Remove via admin API.
+	resp, _ = http.DefaultClient.Do(adminReq("DELETE", hub.URL+"/admin/upstreams/"+id, ""))
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete: status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Verify empty before restart.
+	before := adminList(t, hub.URL)
+	if len(before) != 0 {
+		t.Fatalf("before restart: expected 0, got %+v", before)
+	}
+
+	// Simulate restart with EMPTY config (like user's config.yaml that only
+	// has `omnilauncher`, not the deleted `hermes`).
+	hub2, _ := rebuildHub(t, db, nil)
+	defer hub2.Close()
+
+	after := adminList(t, hub2.URL)
+	if len(after) != 0 {
+		t.Fatalf("after restart: admin-removed upstream reappeared: %+v", after)
+	}
+}
+
+func TestIntegration_AdminRemove_DoesNotReappearAfterRestart_UnrelatedConfig(t *testing.T) {
+	// Same as above but with an unrelated upstream in config, matching the
+	// user's actual setup (omnilauncher in config, hermes removed via admin).
+	hub, fake, db, _, cleanup := bootHubWithDB(t)
+	defer cleanup()
+
+	// Add TWO admin upstreams.
+	for _, name := range []string{"keeper", "goner"} {
+		addBody := `{"name":"` + name + `","base_url":"` + fake.URL + `","auth":{"scheme":"none"}}`
+		resp, _ := http.DefaultClient.Do(adminReq("POST", hub.URL+"/admin/upstreams", addBody))
+		if resp.StatusCode != http.StatusCreated {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("add %s: status=%d body=%s", name, resp.StatusCode, body)
+		}
+		resp.Body.Close()
+	}
+
+	// Remove `goner` only.
+	list := adminList(t, hub.URL)
+	var gonerID string
+	for _, item := range list {
+		if item["name"] == "goner" {
+			gonerID = item["id"].(string)
+		}
+	}
+	if gonerID == "" {
+		t.Fatalf("goner not found in list: %+v", list)
+	}
+	resp, _ := http.DefaultClient.Do(adminReq("DELETE", hub.URL+"/admin/upstreams/"+gonerID, ""))
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete goner: status=%d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Restart with no config upstreams.
+	hub2, _ := rebuildHub(t, db, nil)
+	defer hub2.Close()
+
+	after := adminList(t, hub2.URL)
+	names := map[string]bool{}
+	for _, item := range after {
+		names[item["name"].(string)] = true
+	}
+	if names["goner"] {
+		t.Fatalf("admin-removed 'goner' reappeared after restart: %+v", after)
+	}
+	if !names["keeper"] {
+		t.Fatalf("admin-added 'keeper' should survive restart, got %+v", after)
+	}
 }

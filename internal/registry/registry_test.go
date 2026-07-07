@@ -341,10 +341,74 @@ func TestAdd_ReAddAfterRemove_ReusesDBID(t *testing.T) {
 	}
 }
 
+func TestBootstrap_SkipsAdminDisabledRows(t *testing.T) {
+	// Regression: bootstrap loaded ALL DB rows (including admin-source
+	// enabled=0) into the in-memory registry. That made admin-removed
+	// upstreams reappear in `oah up list` after restart.
+	ctx := context.Background()
+	db := openTestStore(t)
+	f := &fakeFetcher{card: &a2a.AgentCard{Name: "u", URL: "http://u"}}
+	r := New(db, f)
+
+	// Add + remove an admin upstream (soft-deletes in DB).
+	u, err := r.Add(ctx, AddInput{Name: "removed", BaseURL: "http://x"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := r.Remove(ctx, u.ID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// The DB row still exists (soft-delete for FK integrity).
+	row, err := db.GetUpstreamByName(ctx, "removed")
+	if err != nil {
+		t.Fatalf("DB row missing after soft-delete: %v", err)
+	}
+	if row.Enabled {
+		t.Fatalf("DB row should be disabled after Remove")
+	}
+
+	// Bootstrap a fresh registry from the same DB with no config.
+	r2 := New(db, f)
+	if err := Bootstrap(ctx, r2, db, nil); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// The admin-disabled row must NOT be loaded into memory.
+	if len(r2.List()) != 0 {
+		t.Fatalf("admin-disabled row should not be loaded, got %+v", r2.List())
+	}
+	if _, ok := r2.GetByName("removed"); ok {
+		t.Fatalf("GetByName should not find admin-disabled row")
+	}
+}
+
+func TestBootstrap_KeepsAdminEnabledRows(t *testing.T) {
+	// Verify that admin-source enabled rows ARE loaded (regression guard).
+	ctx := context.Background()
+	db := openTestStore(t)
+	f := &fakeFetcher{card: &a2a.AgentCard{Name: "u", URL: "http://u"}}
+	r := New(db, f)
+
+	// Add an admin upstream (not removed).
+	if _, err := r.Add(ctx, AddInput{Name: "kept", BaseURL: "http://x"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	// Bootstrap fresh registry.
+	r2 := New(db, f)
+	if err := Bootstrap(ctx, r2, db, nil); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if len(r2.List()) != 1 {
+		t.Fatalf("admin-enabled row should be loaded, got %+v", r2.List())
+	}
+}
+
 func TestBootstrap_DoesNotReEnableAdminRemovedUpstream(t *testing.T) {
-	// Regression: an upstream removed via admin API (soft-delete) would
-	// reappear after restart because bootstrap unconditionally overlaid
-	// config's enabled=true onto the DB row.
+	// An admin-removed upstream that is NOT listed in config must stay
+	// removed after restart. (If config still lists it, config wins — see
+	// TestBootstrap_ConfigOverridesAdminRemoval.)
 	ctx := context.Background()
 	db := openTestStore(t)
 	f := &fakeFetcher{card: &a2a.AgentCard{Name: "x", URL: "http://x"}}
@@ -378,26 +442,58 @@ func TestBootstrap_DoesNotReEnableAdminRemovedUpstream(t *testing.T) {
 		t.Fatalf("expected 1 upstream after remove, got %d", len(r.List()))
 	}
 
-	// Step 4: Re-bootstrap with config that includes the removed upstream
-	// (simulates restart where config.yaml still lists it).
+	// Step 4: Re-bootstrap with config that does NOT include the removed
+	// upstream (matching real-world case: hermes was admin-added and only
+	// omnilauncher is in config.yaml).
 	r2 := New(db, f)
-	cfg2 := []config.UpstreamCfg{
-		{Name: "alpha", BaseURL: "http://alpha", Auth: config.AuthConfig{Scheme: "none"}, Enabled: true},
-		{Name: "beta", BaseURL: "http://beta", Auth: config.AuthConfig{Scheme: "none"}, Enabled: true},
-	}
-	if err := Bootstrap(ctx, r2, db, cfg2); err != nil {
+	if err := Bootstrap(ctx, r2, db, cfg); err != nil {
 		t.Fatalf("Bootstrap 2: %v", err)
 	}
 
-	// The admin-removed upstream must NOT be re-enabled.
-	var betaFound bool
+	// The admin-removed upstream must NOT reappear.
 	for _, u := range r2.List() {
-		if u.Name == "beta" && u.Enabled {
-			betaFound = true
+		if u.Name == "beta" {
+			t.Fatalf("admin-removed upstream 'beta' reappeared after restart — bug!")
 		}
 	}
-	if betaFound {
-		t.Fatalf("admin-removed upstream 'beta' was re-enabled by bootstrap — bug!")
+}
+
+func TestBootstrap_ConfigOverridesAdminRemoval(t *testing.T) {
+	// If a user explicitly lists an upstream in config.yaml, config wins:
+	// the upstream is (re-)created even if admin previously removed it.
+	// This is the declarative-config-is-source-of-truth interpretation.
+	ctx := context.Background()
+	db := openTestStore(t)
+	f := &fakeFetcher{card: &a2a.AgentCard{Name: "x", URL: "http://x"}}
+	r := New(db, f)
+
+	// Add + remove via admin.
+	u, err := r.Add(ctx, AddInput{Name: "beta", BaseURL: "http://beta"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := r.Remove(ctx, u.ID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// Restart with config that explicitly lists it.
+	r2 := New(db, f)
+	cfg := []config.UpstreamCfg{
+		{Name: "beta", BaseURL: "http://beta", Auth: config.AuthConfig{Scheme: "none"}, Enabled: true},
+	}
+	if err := Bootstrap(ctx, r2, db, cfg); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// The upstream should be present and enabled because config re-declares it.
+	found := false
+	for _, u := range r2.List() {
+		if u.Name == "beta" && u.Enabled {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("config-declared upstream 'beta' should be present after restart")
 	}
 }
 
