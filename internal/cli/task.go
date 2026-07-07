@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -207,8 +208,9 @@ If no task-id is provided, interactively select from active tasks.`,
 			fmt.Fprintf(out, "  Updated         : %s\n", data["updated_at"])
 			if task, ok := data["task"]; ok && task != nil {
 				fmt.Fprintln(out, "\n  Task snapshot:")
-				b, _ := json.MarshalIndent(task, "    ", "  ")
-				fmt.Fprintf(out, "    %s\n", string(b))
+				if err := printTaskSnapshot(out, task); err != nil {
+					return err
+				}
 			}
 			fmt.Fprintln(out)
 			return nil
@@ -292,6 +294,87 @@ If no task-id is provided, interactively select from active tasks.`,
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip confirmation")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
 	return cmd
+}
+
+func printTaskSnapshot(out io.Writer, task any) error {
+	b, err := json.Marshal(task)
+	if err != nil {
+		return err
+	}
+	var snap struct {
+		TaskID    string `json:"id"`
+		ContextID string `json:"contextId"`
+		Status    struct {
+			State   string `json:"state"`
+			Message *struct {
+				MessageID string `json:"messageId"`
+				Role      string `json:"role"`
+				Parts     []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"parts"`
+			} `json:"message"`
+		} `json:"status"`
+		Artifacts []struct {
+			ArtifactID string `json:"artifactId"`
+			Name       string `json:"name"`
+			Parts      []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"artifacts"`
+		History []struct {
+			MessageID string `json:"messageId"`
+			Role      string `json:"role"`
+			Parts     []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"history"`
+	}
+	if err := json.Unmarshal(b, &snap); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(out, "    id            : %s\n", snap.TaskID)
+	fmt.Fprintf(out, "    contextId     : %s\n", snap.ContextID)
+	fmt.Fprintf(out, "    state         : %s\n", snap.Status.State)
+	if snap.Status.Message != nil {
+		fmt.Fprintln(out, "    status message:")
+		fmt.Fprintf(out, "      role         : %s\n", snap.Status.Message.Role)
+		fmt.Fprintf(out, "      messageId    : %s\n", snap.Status.Message.MessageID)
+		for i, p := range snap.Status.Message.Parts {
+			if p.Text != "" {
+				fmt.Fprintf(out, "      part %d text  : %s\n", i+1, p.Text)
+			}
+			if p.Type != "" {
+				fmt.Fprintf(out, "      part %d type  : %s\n", i+1, p.Type)
+			}
+		}
+	}
+	if len(snap.Artifacts) > 0 {
+		fmt.Fprintln(out, "    artifacts:")
+		for _, a := range snap.Artifacts {
+			fmt.Fprintf(out, "      - %s\n", a.Name)
+			for i, p := range a.Parts {
+				if p.Text != "" {
+					fmt.Fprintf(out, "        part %d: %s\n", i+1, p.Text)
+				}
+			}
+		}
+	}
+	if len(snap.History) > 0 {
+		fmt.Fprintln(out, "    history:")
+		for i, m := range snap.History {
+			fmt.Fprintf(out, "      %d. %s\n", i+1, m.Role)
+			for _, p := range m.Parts {
+				if p.Text != "" {
+					fmt.Fprintf(out, "         - %s\n", p.Text)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // --- Task selection helper ---------------------------------------------------
