@@ -25,6 +25,8 @@ func newUpstreamCmd(opts *Opts) *cobra.Command {
 	cmd.AddCommand(newUpstreamRemoveCmd(opts))
 	cmd.AddCommand(newUpstreamRefreshCmd(opts))
 	cmd.AddCommand(newUpstreamEditCmd(opts))
+	cmd.AddCommand(newUpstreamInspectCmd(opts))
+	cmd.AddCommand(newUpstreamTestCmd(opts))
 	return cmd
 }
 
@@ -398,4 +400,191 @@ the current value. Internally removes and re-adds the upstream.`,
 			return nil
 		},
 	}
+}
+
+func newUpstreamInspectCmd(opts *Opts) *cobra.Command {
+	var asJSON bool
+
+	cmd := &cobra.Command{
+		Use:   "inspect [name-or-id]",
+		Short: "Show detailed information about an upstream agent",
+		Long: `Inspect an upstream agent's full configuration, health state,
+and agent card.
+
+If no argument is given, interactively select from registered upstreams.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newAdminClient(opts)
+
+			target := ""
+			if len(args) > 0 {
+				target = args[0]
+			} else {
+				u, err := selectUpstream(c)
+				if err != nil {
+					return err
+				}
+				if u == nil {
+					return nil
+				}
+				target = u.ID
+			}
+
+			resp, err := c.do("GET", "/admin/upstreams/"+target, nil)
+			if err != nil {
+				return fmt.Errorf("cannot reach hub at %s — is it running?\n  %w", c.baseURL, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				return httpErr(resp)
+			}
+
+			var data map[string]any
+			if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if asJSON {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(data)
+			}
+
+			fmt.Fprintln(out)
+			fmt.Fprintf(out, "  ID               : %s\n", data["id"])
+			fmt.Fprintf(out, "  Name             : %s\n", data["name"])
+			fmt.Fprintf(out, "  Base URL         : %s\n", data["base_url"])
+			fmt.Fprintf(out, "  Prefix           : %s\n", data["prefix"])
+			fmt.Fprintf(out, "  Enabled          : %v\n", data["enabled"])
+			fmt.Fprintf(out, "  Source           : %s\n", data["source"])
+			fmt.Fprintf(out, "  Status           : %s\n", colorStatus(fmt.Sprint(data["status"])))
+			fmt.Fprintf(out, "  Consecutive Fails: %v\n", data["consecutive_failures"])
+
+			if auth, ok := data["auth"].(map[string]any); ok {
+				fmt.Fprintf(out, "  Auth Scheme      : %s\n", auth["scheme"])
+				if hint, ok := auth["token_hint"].(string); ok && hint != "" {
+					fmt.Fprintf(out, "  Token Hint       : %s\n", hint)
+				}
+			}
+
+			if ts, ok := data["last_success_at"].(string); ok && ts != "" {
+				fmt.Fprintf(out, "  Last Success     : %s\n", formatTimeSince(ts))
+			}
+			if ts, ok := data["last_failure_at"].(string); ok && ts != "" {
+				fmt.Fprintf(out, "  Last Failure     : %s\n", formatTimeSince(ts))
+			}
+			if ts, ok := data["card_fetched_at"].(string); ok && ts != "" {
+				fmt.Fprintf(out, "  Card Fetched     : %s\n", formatTimeSince(ts))
+			}
+
+			if card, ok := data["card"].(map[string]any); ok {
+				fmt.Fprintln(out)
+				fmt.Fprintln(out, "  Agent Card:")
+				fmt.Fprintf(out, "    Name        : %s\n", card["name"])
+				fmt.Fprintf(out, "    Description : %s\n", card["description"])
+				fmt.Fprintf(out, "    URL         : %s\n", card["url"])
+				fmt.Fprintf(out, "    Version     : %s\n", card["version"])
+
+				if skills, ok := card["skills"].([]any); ok && len(skills) > 0 {
+					fmt.Fprintf(out, "    Skills (%d):\n", len(skills))
+					for _, s := range skills {
+						if sm, ok := s.(map[string]any); ok {
+							fmt.Fprintf(out, "      • %-20s %s\n", sm["id"], sm["name"])
+						}
+					}
+				}
+			}
+			fmt.Fprintln(out)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
+	return cmd
+}
+
+func newUpstreamTestCmd(opts *Opts) *cobra.Command {
+	var asJSON bool
+
+	cmd := &cobra.Command{
+		Use:   "test [name-or-id]",
+		Short: "Test connectivity to an upstream agent",
+		Long: `Probe an upstream agent by fetching its agent card endpoint.
+
+Reports latency, HTTP status, and whether a valid card was returned.
+Does NOT modify the cached card or health state.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newAdminClient(opts)
+
+			target := ""
+			if len(args) > 0 {
+				target = args[0]
+			} else {
+				u, err := selectUpstream(c)
+				if err != nil {
+					return err
+				}
+				if u == nil {
+					return nil
+				}
+				target = u.ID
+			}
+
+			resp, err := c.do("POST", "/admin/upstreams/"+target+"/test", nil)
+			if err != nil {
+				return fmt.Errorf("cannot reach hub at %s — is it running?\n  %w", c.baseURL, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				return httpErr(resp)
+			}
+
+			var result struct {
+				OK         bool   `json:"ok"`
+				UpstreamID string `json:"upstream_id"`
+				BaseURL    string `json:"base_url"`
+				CardURL    string `json:"card_url"`
+				StatusCode int    `json:"status_code"`
+				LatencyMS  int64  `json:"latency_ms"`
+				HasCard    bool   `json:"has_card"`
+				SkillCount int    `json:"skill_count"`
+				Error      string `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if asJSON {
+				enc := json.NewEncoder(out)
+				enc.SetIndent("", "  ")
+				return enc.Encode(result)
+			}
+
+			fmt.Fprintln(out)
+			if result.OK {
+				fmt.Fprintf(out, "  %s Connectivity test passed\n", green("✓"))
+			} else {
+				fmt.Fprintf(out, "  %s Connectivity test failed\n", red("✗"))
+			}
+			fmt.Fprintf(out, "  Base URL   : %s\n", result.BaseURL)
+			fmt.Fprintf(out, "  Card URL   : %s\n", result.CardURL)
+			fmt.Fprintf(out, "  Status     : %d\n", result.StatusCode)
+			fmt.Fprintf(out, "  Latency    : %dms\n", result.LatencyMS)
+			fmt.Fprintf(out, "  Has Card   : %v\n", result.HasCard)
+			if result.HasCard {
+				fmt.Fprintf(out, "  Skills     : %d\n", result.SkillCount)
+			}
+			if result.Error != "" {
+				fmt.Fprintf(out, "  Error      : %s\n", red(result.Error))
+			}
+			fmt.Fprintln(out)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
+	return cmd
 }

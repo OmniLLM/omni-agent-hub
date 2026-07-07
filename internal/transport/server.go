@@ -73,11 +73,19 @@ func (s *Server) routes() {
 	// Admin surface.
 	s.mux.HandleFunc("GET /admin/upstreams", s.adminAuth(s.handleAdminListUpstreams))
 	s.mux.HandleFunc("POST /admin/upstreams", s.adminAuth(s.handleAdminAddUpstream))
+	s.mux.HandleFunc("GET /admin/upstreams/{id}", s.adminAuth(s.handleAdminGetUpstream))
 	s.mux.HandleFunc("DELETE /admin/upstreams/{id}", s.adminAuth(s.handleAdminRemoveUpstream))
 	s.mux.HandleFunc("POST /admin/upstreams/{id}/refresh", s.adminAuth(s.handleAdminRefreshOne))
+	s.mux.HandleFunc("POST /admin/upstreams/{id}/test", s.adminAuth(s.handleAdminTestUpstream))
 	s.mux.HandleFunc("POST /admin/refresh", s.adminAuth(s.handleAdminRefreshAll))
 	s.mux.HandleFunc("GET /admin/skills", s.adminAuth(s.handleAdminSkills))
-}
+	s.mux.HandleFunc("GET /admin/health", s.adminAuth(s.handleAdminHealth))
+	s.mux.HandleFunc("GET /admin/tasks", s.adminAuth(s.handleAdminListTasks))
+	s.mux.HandleFunc("GET /admin/tasks/{id}", s.adminAuth(s.handleAdminGetTask))
+	s.mux.HandleFunc("POST /admin/tasks/{id}/cancel", s.adminAuth(s.handleAdminCancelTask))
+	s.mux.HandleFunc("GET /admin/audit", s.adminAuth(s.handleAdminListAudit))
+	s.mux.HandleFunc("POST /admin/messages", s.adminAuth(s.handleAdminSendMessage))
+	s.mux.HandleFunc("GET /admin/version", s.adminAuth(s.handleAdminVersion))}
 
 // --- Middleware ------------------------------------------------------------
 

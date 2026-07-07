@@ -1,5 +1,8 @@
 .PHONY: build run clean test fmt lint logs install \
-       start stop restart status
+       start stop restart status \
+       health skills audit tasks version config-init \
+       upstream-list upstream-refresh upstream-inspect upstream-test \
+       message-send
 
 BINARY := oah
 CMD := ./cmd/omni-agent-hub
@@ -46,6 +49,35 @@ upstream-list:
 
 upstream-refresh:
 	./$(BINARY) upstream refresh
+
+# ── interactive CLI commands ───────────────────────────────────
+
+health: build
+	./$(BINARY) health
+
+skills: build
+	./$(BINARY) skills
+
+audit: build
+	./$(BINARY) audit
+
+tasks: build
+	./$(BINARY) task list
+
+version: build
+	./$(BINARY) version --remote
+
+config-init: build
+	./$(BINARY) config init
+
+upstream-inspect: build
+	./$(BINARY) upstream inspect
+
+upstream-test: build
+	./$(BINARY) upstream test
+
+message-send: build
+	./$(BINARY) message send
 
 # ── systemd service (optional) ─────────────────────────────────
 

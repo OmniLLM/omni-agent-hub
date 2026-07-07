@@ -174,3 +174,200 @@ func (s *Store) LookupUpstreamTaskID(ctx context.Context, hubTaskID string) (str
 	}
 	return id, nil
 }
+
+// --- List / detail / counts ------------------------------------------------
+
+// TaskListFilter controls which tasks ListTasks returns.
+type TaskListFilter struct {
+	States     []a2a.TaskState
+	UpstreamID string
+	ContextID  string
+	Recent     bool // when true and States is empty, include terminal states
+	Limit      int
+	Offset     int
+}
+
+// TaskListRow is a single row from ListTasks.
+type TaskListRow struct {
+	HubTaskID      string        `json:"hub_task_id"`
+	ContextID      string        `json:"context_id"`
+	UpstreamID     string        `json:"upstream_id"`
+	UpstreamTaskID string        `json:"upstream_task_id"`
+	State          a2a.TaskState `json:"state"`
+	CreatedAt      string        `json:"created_at"`
+	UpdatedAt      string        `json:"updated_at"`
+	HasSnapshot    bool          `json:"has_snapshot"`
+}
+
+// TaskCounts aggregates task counts by state.
+type TaskCounts struct {
+	Submitted     int `json:"submitted"`
+	Working       int `json:"working"`
+	InputRequired int `json:"input_required"`
+	Completed     int `json:"completed"`
+	Failed        int `json:"failed"`
+	Canceled      int `json:"canceled"`
+	Total         int `json:"total"`
+}
+
+// TaskDetail combines a TaskRow with its mapped upstream task ID.
+type TaskDetail struct {
+	Task           TaskRow `json:"task"`
+	UpstreamTaskID string  `json:"upstream_task_id"`
+}
+
+// ListTasks returns tasks matching the filter. If no States are provided and
+// Recent is false, only non-terminal tasks are returned.
+func (s *Store) ListTasks(ctx context.Context, f TaskListFilter) ([]TaskListRow, error) {
+	query, args := buildTaskListQuery("SELECT", f)
+	rows, err := s.db.QueryContext(s.withCtx(ctx), query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TaskListRow
+	for rows.Next() {
+		var r TaskListRow
+		var upTaskID sql.NullString
+		var hasSn int
+		if err := rows.Scan(&r.HubTaskID, &r.ContextID, &r.UpstreamID,
+			&upTaskID, &r.State, &r.CreatedAt, &r.UpdatedAt, &hasSn); err != nil {
+			return nil, fmt.Errorf("scan task row: %w", err)
+		}
+		if upTaskID.Valid {
+			r.UpstreamTaskID = upTaskID.String
+		}
+		r.HasSnapshot = hasSn != 0
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CountTasks returns the total number of tasks matching the filter (for pagination).
+func (s *Store) CountTasks(ctx context.Context, f TaskListFilter) (int, error) {
+	query, args := buildTaskListQuery("COUNT", f)
+	var n int
+	if err := s.db.QueryRowContext(s.withCtx(ctx), query, args...).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count tasks: %w", err)
+	}
+	return n, nil
+}
+
+// CountTasksByState returns aggregate counts for every task state.
+func (s *Store) CountTasksByState(ctx context.Context) (TaskCounts, error) {
+	const q = `SELECT state, COUNT(*) FROM tasks GROUP BY state`
+	rows, err := s.db.QueryContext(s.withCtx(ctx), q)
+	if err != nil {
+		return TaskCounts{}, fmt.Errorf("count tasks by state: %w", err)
+	}
+	defer rows.Close()
+
+	var c TaskCounts
+	for rows.Next() {
+		var state string
+		var n int
+		if err := rows.Scan(&state, &n); err != nil {
+			return TaskCounts{}, fmt.Errorf("scan task count: %w", err)
+		}
+		c.Total += n
+		switch a2a.TaskState(state) {
+		case a2a.TaskStateSubmitted:
+			c.Submitted = n
+		case a2a.TaskStateWorking:
+			c.Working = n
+		case a2a.TaskStateInputRequired:
+			c.InputRequired = n
+		case a2a.TaskStateCompleted:
+			c.Completed = n
+		case a2a.TaskStateFailed:
+			c.Failed = n
+		case a2a.TaskStateCanceled:
+			c.Canceled = n
+		}
+	}
+	return c, rows.Err()
+}
+
+// GetTaskDetail returns a TaskRow with its mapped upstream task ID.
+func (s *Store) GetTaskDetail(ctx context.Context, hubTaskID string) (TaskDetail, error) {
+	task, err := s.GetTask(ctx, hubTaskID)
+	if err != nil {
+		return TaskDetail{}, err
+	}
+	upID, _ := s.LookupUpstreamTaskID(ctx, hubTaskID)
+	return TaskDetail{Task: task, UpstreamTaskID: upID}, nil
+}
+
+// buildTaskListQuery assembles the SELECT or COUNT query for tasks.
+func buildTaskListQuery(mode string, f TaskListFilter) (string, []any) {
+	var args []any
+	var where []string
+
+	// State filter.
+	if len(f.States) > 0 {
+		placeholders := make([]string, len(f.States))
+		for i, s := range f.States {
+			placeholders[i] = "?"
+			args = append(args, string(s))
+		}
+		where = append(where, "t.state IN ("+join(placeholders, ",")+")")
+	} else if !f.Recent {
+		// Default: active (non-terminal) tasks only.
+		where = append(where, "t.state IN ('submitted','working','input-required')")
+	}
+	if f.UpstreamID != "" {
+		where = append(where, "t.upstream_id = ?")
+		args = append(args, f.UpstreamID)
+	}
+	if f.ContextID != "" {
+		where = append(where, "t.context_id = ?")
+		args = append(args, f.ContextID)
+	}
+
+	whereClause := ""
+	if len(where) > 0 {
+		whereClause = " WHERE " + join(where, " AND ")
+	}
+
+	if mode == "COUNT" {
+		return "SELECT COUNT(*) FROM tasks t" + whereClause, args
+	}
+
+	q := `SELECT t.hub_task_id, t.context_id, t.upstream_id,
+	             m.upstream_task_id, t.state, t.created_at, t.updated_at,
+	             CASE WHEN t.last_task_json IS NOT NULL AND t.last_task_json != '' THEN 1 ELSE 0 END
+	      FROM tasks t
+	      LEFT JOIN task_id_map m ON m.hub_task_id = t.hub_task_id` +
+		whereClause +
+		` ORDER BY t.updated_at DESC, t.created_at DESC`
+
+	lim := f.Limit
+	if lim <= 0 {
+		lim = 50
+	}
+	q += fmt.Sprintf(" LIMIT %d", lim)
+	if f.Offset > 0 {
+		q += fmt.Sprintf(" OFFSET %d", f.Offset)
+	}
+	return q, args
+}
+
+// join is a minimal strings.Join to avoid importing "strings" for one call.
+func join(elems []string, sep string) string {
+	if len(elems) == 0 {
+		return ""
+	}
+	n := len(sep) * (len(elems) - 1)
+	for _, e := range elems {
+		n += len(e)
+	}
+	b := make([]byte, 0, n)
+	for i, e := range elems {
+		if i > 0 {
+			b = append(b, sep...)
+		}
+		b = append(b, e...)
+	}
+	return string(b)
+}

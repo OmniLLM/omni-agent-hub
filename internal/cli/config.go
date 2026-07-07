@@ -15,6 +15,7 @@ func newConfigCmd(opts *Opts) *cobra.Command {
 	}
 	cmd.AddCommand(newConfigMigrateCmd(opts))
 	cmd.AddCommand(newConfigShowCmd(opts))
+	cmd.AddCommand(newConfigInitCmd(opts))
 	return cmd
 }
 
