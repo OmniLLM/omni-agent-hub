@@ -317,3 +317,49 @@ POST /message:send
 ```
 
 This is a compatibility shim — it internally converts to `message/send`. **New clients should use the JSON-RPC endpoint at `POST /`.**
+
+---
+
+## 13. REST Binding: `/a2a/v1`
+
+Clients that prefer path-style HTTP can use the REST binding. It uses the same
+A2A params and hub task IDs as JSON-RPC, but omits the JSON-RPC envelope:
+
+```bash
+# Send a message: raw SendMessageParams in, raw Task out
+curl -X POST http://localhost:8222/a2a/v1/message:send \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{
+    "skillId": "omnilauncher.plugin:tool:shell_exec",
+    "contextId": "ctx-42",
+    "message": { "role": "user", "parts": [{ "text": "ls -la" }] }
+  }'
+
+# Stream a message: raw SendMessageParams in, raw A2A SSE events out
+curl -N -X POST http://localhost:8222/a2a/v1/message:stream \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <api_key>" \
+  -d '{
+    "skillId": "omnilauncher.plugin:tool:shell_exec",
+    "message": { "role": "user", "parts": [{ "text": "ls -la" }] }
+  }'
+
+# Get task status
+curl -H "Authorization: Bearer <api_key>" \
+  http://localhost:8222/a2a/v1/tasks/<hub-task-id>
+
+# Cancel a task
+curl -X POST -H "Authorization: Bearer <api_key>" \
+  http://localhost:8222/a2a/v1/tasks/<hub-task-id>:cancel
+```
+
+REST errors are plain JSON with the same A2A error codes used by JSON-RPC:
+
+```json
+{ "error": { "code": -32011, "message": "No route" } }
+```
+
+The HTTP status reflects the error class: invalid requests return `400`, missing
+tasks return `404`, unavailable upstreams return `503`, and upstream/routing
+failures return `502`.

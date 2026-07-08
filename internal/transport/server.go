@@ -1,9 +1,9 @@
 // Package transport hosts the HTTP surface of the omni-agent-hub hub.
 //
 // Handler-thinness invariant: every handler function does exactly three things:
-//   1. parse the request into a strong type,
-//   2. call ONE method on dispatch, registry, or card.Current(),
-//   3. serialize and write the response.
+//  1. parse the request into a strong type,
+//  2. call ONE method on dispatch, registry, or card.Current(),
+//  3. serialize and write the response.
 //
 // Anything more (routing, validation, business rules) belongs in the packages
 // underneath.
@@ -28,13 +28,13 @@ import (
 
 // Deps bundles what a Server needs at construction time.
 type Deps struct {
-	Cfg      *config.Config
-	Reg      registry.Registry
-	Card     card.Builder
-	Store    *store.Store
-	Unary    dispatch.Unary
-	Stream   dispatch.Stream
-	Version  string
+	Cfg     *config.Config
+	Reg     registry.Registry
+	Card    card.Builder
+	Store   *store.Store
+	Unary   dispatch.Unary
+	Stream  dispatch.Stream
+	Version string
 }
 
 // Server holds the mux and deps.
@@ -69,6 +69,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /", s.clientAuth(s.handleJSONRPC))
 	// Path-style compat shim (converts to message/send internally).
 	s.mux.HandleFunc("POST /message:send", s.clientAuth(s.handleMessageSendCompat))
+	// REST (A2A HTTP+JSON) binding: bare MessageSendParams in, raw Task / SSE out.
+	s.mux.HandleFunc("POST /a2a/v1/message:send", s.clientAuth(s.handleRESTMessageSend))
+	s.mux.HandleFunc("POST /a2a/v1/message:stream", s.clientAuth(s.handleRESTMessageStream))
+	s.mux.HandleFunc("GET /a2a/v1/tasks/{id}", s.clientAuth(s.handleRESTGetTask))
+	s.mux.HandleFunc("POST /a2a/v1/tasks/", s.clientAuth(s.handleRESTTaskAction))
+	s.mux.HandleFunc("POST /message:stream", s.clientAuth(s.handleRESTMessageStream))
 
 	// Admin surface.
 	s.mux.HandleFunc("GET /admin/upstreams", s.adminAuth(s.handleAdminListUpstreams))
@@ -85,7 +91,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/tasks/{id}/cancel", s.adminAuth(s.handleAdminCancelTask))
 	s.mux.HandleFunc("GET /admin/audit", s.adminAuth(s.handleAdminListAudit))
 	s.mux.HandleFunc("POST /admin/messages", s.adminAuth(s.handleAdminSendMessage))
-	s.mux.HandleFunc("GET /admin/version", s.adminAuth(s.handleAdminVersion))}
+	s.mux.HandleFunc("GET /admin/version", s.adminAuth(s.handleAdminVersion))
+}
 
 // --- Middleware ------------------------------------------------------------
 

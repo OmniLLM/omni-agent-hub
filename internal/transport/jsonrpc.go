@@ -71,13 +71,7 @@ func (s *Server) jsonrpcSendMessage(w http.ResponseWriter, r *http.Request, req 
 		"text_preview", truncate(params.Message.FirstText(), 80),
 	)
 
-	// Build a snapshot for the router. Sticky lookup goes through store.
-	snap := s.snapshot(r, params.ContextID)
-	res, ok := router.Resolve(router.Request{
-		SkillID:   params.SkillID,
-		Text:      params.Message.FirstText(),
-		ContextID: params.ContextID,
-	}, snap)
+	res, upstreamName, ok := s.route(r, params)
 	if !ok {
 		slog.Warn("jsonrpc no route",
 			"trace_id", tid,
@@ -87,12 +81,6 @@ func (s *Server) jsonrpcSendMessage(w http.ResponseWriter, r *http.Request, req 
 		writeJSONRPCError(w, req.ID, a2a.ErrNoRoute, "No route",
 			"could not resolve request to any healthy upstream")
 		return
-	}
-
-	// Resolve upstream name for logging.
-	upstreamName := string(res.UpstreamID)
-	if u, found := s.deps.Reg.Get(res.UpstreamID); found {
-		upstreamName = u.Name
 	}
 	slog.Info("jsonrpc routed",
 		"trace_id", tid,
@@ -146,6 +134,14 @@ func (s *Server) serveSSE(w http.ResponseWriter, r *http.Request, id json.RawMes
 		writeAnyJSONRPCError(w, id, err)
 		return
 	}
+	streamSSE(w, flusher, ch)
+}
+
+// streamSSE writes event-stream headers, then pumps each event's raw payload as
+// an SSE `data:` frame until the channel closes. Shared by the JSON-RPC
+// (message/sendSubscribe) and REST (message:stream) surfaces — the event bytes
+// are already raw A2A events, identical on both wires.
+func streamSSE(w http.ResponseWriter, flusher http.Flusher, ch <-chan dispatch.StreamEvent) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -282,6 +278,27 @@ func (s *Server) handleMessageSendCompat(w http.ResponseWriter, r *http.Request)
 		"state", resp.Task.Status.State,
 	)
 	writeJSON(w, http.StatusOK, resp.Task)
+}
+
+// route resolves a send/stream request to an upstream via the router. It
+// returns the resolution and the upstream's display name (falling back to its
+// ID). ok is false when no healthy upstream matches. It performs no logging so
+// callers can frame the outcome for their own wire (JSON-RPC vs REST).
+func (s *Server) route(r *http.Request, params a2a.SendMessageParams) (router.Resolution, string, bool) {
+	snap := s.snapshot(r, params.ContextID)
+	res, ok := router.Resolve(router.Request{
+		SkillID:   params.SkillID,
+		Text:      params.Message.FirstText(),
+		ContextID: params.ContextID,
+	}, snap)
+	if !ok {
+		return router.Resolution{}, "", false
+	}
+	upstreamName := string(res.UpstreamID)
+	if u, found := s.deps.Reg.Get(res.UpstreamID); found {
+		upstreamName = u.Name
+	}
+	return res, upstreamName, true
 }
 
 // snapshot assembles a router.Snapshot from the registry, adding sticky
