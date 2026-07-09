@@ -85,6 +85,40 @@ func (s *Server) handleAdminAddUpstream(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusCreated, upstreamToInfo(up))
 }
 
+func (s *Server) handleAdminUpsertUpstream(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name    string            `json:"name"`
+		BaseURL string            `json:"base_url"`
+		Prefix  string            `json:"prefix,omitempty"`
+		Auth    config.AuthConfig `json:"auth"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if body.Auth.Scheme == "" {
+		body.Auth.Scheme = "none"
+	}
+
+	status := http.StatusCreated
+	if existing, ok := s.deps.Reg.GetByName(body.Name); ok {
+		if err := s.deps.Reg.Remove(r.Context(), existing.ID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		status = http.StatusOK
+	}
+
+	up, err := s.deps.Reg.Add(r.Context(), registry.AddInput{
+		Name: body.Name, BaseURL: body.BaseURL, Prefix: body.Prefix, Auth: body.Auth,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, status, upstreamToInfo(up))
+}
+
 func (s *Server) handleAdminRemoveUpstream(w http.ResponseWriter, r *http.Request) {
 	id := registry.UpstreamID(r.PathValue("id"))
 	if err := s.deps.Reg.Remove(r.Context(), id); err != nil {

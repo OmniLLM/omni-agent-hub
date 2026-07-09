@@ -79,6 +79,7 @@ func (s *Server) routes() {
 	// Admin surface.
 	s.mux.HandleFunc("GET /admin/upstreams", s.adminAuth(s.handleAdminListUpstreams))
 	s.mux.HandleFunc("POST /admin/upstreams", s.adminAuth(s.handleAdminAddUpstream))
+	s.mux.HandleFunc("POST /admin/upstreams/upsert", s.adminAuth(s.handleAdminUpsertUpstream))
 	s.mux.HandleFunc("GET /admin/upstreams/{id}", s.adminAuth(s.handleAdminGetUpstream))
 	s.mux.HandleFunc("DELETE /admin/upstreams/{id}", s.adminAuth(s.handleAdminRemoveUpstream))
 	s.mux.HandleFunc("POST /admin/upstreams/{id}/refresh", s.adminAuth(s.handleAdminRefreshOne))

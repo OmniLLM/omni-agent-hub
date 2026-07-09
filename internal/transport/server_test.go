@@ -114,6 +114,36 @@ func TestAdminSurface_SeparateKey(t *testing.T) {
 	}
 }
 
+func TestAdminUpsertUpstream_UpdatesExistingByName(t *testing.T) {
+	s := newTestServer(t)
+
+	body := `{"name":"hermes","base_url":"http://127.0.0.1:1423","prefix":"@hermes","auth":{"scheme":"bearer","token":"tok"}}`
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/admin/upstreams/upsert", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer admin-key")
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected update status 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/admin/upstreams/hermes", nil)
+	req.Header.Set("Authorization", "Bearer admin-key")
+	s.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("inspect status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var detail map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("parse detail: %v", err)
+	}
+	if detail["base_url"] != "http://127.0.0.1:1423" {
+		t.Fatalf("base_url was not updated: %#v", detail["base_url"])
+	}
+}
+
 func TestMessageSend_EndToEnd(t *testing.T) {
 	s := newTestServer(t)
 	body := `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"skillId":"hermes.coding","message":{"role":"user","parts":[{"text":"hi"}]}}}`
