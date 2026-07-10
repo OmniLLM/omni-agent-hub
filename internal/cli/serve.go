@@ -92,6 +92,28 @@ func runServe(cmd *cobra.Command, opts *Opts, host string, port int) error {
 		}
 	}()
 
+	// Periodic background refresh so upstream cards stay current while the
+	// server runs. Disabled when the interval is 0 (hub.refresh_interval: "0").
+	if interval := cfg.Hub.RefreshIntervalOrDefault(); interval > 0 {
+		slog.Info("periodic upstream refresh enabled", "interval", interval.String())
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+					if err := reg.RefreshAll(refreshCtx); err != nil {
+						slog.Warn("periodic card refresh failed", "err", err)
+					}
+					cancel()
+				}
+			}
+		}()
+	}
+
 	// Composite card builder + dispatch + transport.
 	cb := card.Start(ctx, reg, card.FromConfig(cfg, version))
 	disp := dispatch.New(reg, db)

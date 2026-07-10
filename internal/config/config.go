@@ -39,17 +39,18 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 // Config is the top-level configuration for the omni-agent-hub hub.
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Hub      HubConfig      `yaml:"hub"`
-	Storage  StorageConfig  `yaml:"storage"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	Upstream []UpstreamCfg  `yaml:"upstream"`
+	Server   ServerConfig  `yaml:"server"`
+	Hub      HubConfig     `yaml:"hub"`
+	Storage  StorageConfig `yaml:"storage"`
+	Logging  LoggingConfig `yaml:"logging"`
+	Upstream []UpstreamCfg `yaml:"upstream"`
 }
 
 // ServerConfig holds the HTTP server settings.
@@ -65,12 +66,40 @@ type ServerConfig struct {
 type HubConfig struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
+	// RefreshInterval is how often the running server re-fetches all upstream
+	// agent cards in the background (Go duration string, e.g. "10m"). Empty
+	// uses the default (10m); "0" or a negative value disables periodic refresh.
+	RefreshInterval string `yaml:"refresh_interval"`
+}
+
+// DefaultRefreshInterval is the fallback period for background upstream card
+// refresh when hub.refresh_interval is unset.
+const DefaultRefreshInterval = 10 * time.Minute
+
+// RefreshIntervalOrDefault returns the parsed background refresh period. An
+// empty value yields DefaultRefreshInterval; a zero or negative duration
+// disables periodic refresh (returns 0); an unparseable value logs a WARN and
+// uses the default.
+func (h HubConfig) RefreshIntervalOrDefault() time.Duration {
+	if h.RefreshInterval == "" {
+		return DefaultRefreshInterval
+	}
+	d, err := time.ParseDuration(h.RefreshInterval)
+	if err != nil {
+		slog.Warn("invalid hub.refresh_interval; using default",
+			"value", h.RefreshInterval, "default", DefaultRefreshInterval)
+		return DefaultRefreshInterval
+	}
+	if d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // StorageConfig holds SQLite storage settings.
 type StorageConfig struct {
-	Path            string `yaml:"path"`             // SQLite file
-	AuditRetention  int    `yaml:"audit_retention"`  // max rows kept in audit_log
+	Path           string `yaml:"path"`            // SQLite file
+	AuditRetention int    `yaml:"audit_retention"` // max rows kept in audit_log
 }
 
 // LoggingConfig holds log output settings.
